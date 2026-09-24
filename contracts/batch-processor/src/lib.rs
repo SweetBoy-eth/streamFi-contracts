@@ -36,6 +36,39 @@ impl BatchTransferProcessor {
     /// - The batch must not exceed `MAX_BATCH_SIZE` (100 entries).
     /// - Every individual `amount` must be > 0.
     ///
+    /// # Protocol fee
+    /// Batch transfers are **fee-exempt by design**: unlike
+    /// `DripFactory::create_stream`, which deducts `DripGovernor::config().fee_bps`
+    /// on every stream creation, `process_batch` moves the exact `sum(amounts)`
+    /// with no protocol fee. The processor is a separate contract scoped to
+    /// bounded execution only (see ADR-007) and deliberately holds no governor
+    /// coupling; this is an intentional design decision, not an omission.
+    ///
+    /// # Retries and idempotency
+    /// **This function is NOT idempotent and must not be retried blindly.**
+    /// There is no batch identifier or idempotency key: each successful call
+    /// re-pulls the full `sum(amounts)` from the funder and re-transfers to
+    /// every recipient. If a submission appears to fail (e.g. timeout after
+    /// simulation), the caller **must** confirm on-chain state — funder balance,
+    /// recipient balances, or the transaction result — before resubmitting.
+    /// Retrying a call that actually landed pays every recipient a second time
+    /// and drains the funder twice.
+    ///
+    /// # Duplicate recipients
+    /// `recipients` is not deduplicated. If the same address appears more than
+    /// once, each occurrence receives its own separate transfer of the matching
+    /// `amount` entry; duplicates are neither merged nor rejected. The total
+    /// pulled from the funder is still the sum of all entries (each duplicate
+    /// counted once per occurrence), so a recipient listed twice with amounts
+    /// `[10, 20]` ends up with `30`.
+    ///
+    /// # Single-entry batches
+    /// A batch of size 1 is accepted and is functionally equivalent to a plain
+    /// `token.transfer`, but pays this contract's auth and loop overhead. For
+    /// single-recipient payouts, prefer calling `token.transfer` directly;
+    /// route through `process_batch` only when fanning out to multiple
+    /// recipients.
+    ///
     /// # Returns
     /// The total number of tokens transferred on success.
     pub fn process_batch(
