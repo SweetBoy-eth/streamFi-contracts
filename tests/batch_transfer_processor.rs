@@ -231,6 +231,49 @@ fn process_batch_does_not_move_funds_when_validation_fails() {
 }
 
 #[test]
+fn process_batch_pays_duplicate_recipients_separately() {
+    // Documented behavior (#554): recipients are not deduplicated. The same
+    // address listed twice receives one transfer per occurrence — not a
+    // merged single transfer, and not a rejection.
+    let f = setup();
+    f.token_admin_client.mint(&f.funder, &100);
+
+    let dup = Address::generate(&f.env);
+    let recipients = Vec::from_array(&f.env, [dup.clone(), dup.clone()]);
+    let amounts = Vec::from_array(&f.env, [10i128, 20]);
+
+    let total = f
+        .client
+        .process_batch(&f.funder, &f.token.address, &recipients, &amounts);
+
+    assert_eq!(total, 30);
+    // Both entries paid out: 10 + 20, not merged or rejected.
+    assert_eq!(f.token.balance(&dup), 30);
+    assert_eq!(f.token.balance(&f.funder), 70);
+}
+
+#[test]
+fn process_batch_accepts_a_single_entry_batch() {
+    // Documented behavior (#556): size-1 batches are allowed (no
+    // MIN_BATCH_SIZE guard) — callers are advised to use token.transfer
+    // directly for single-recipient payouts, but the contract does not
+    // reject them.
+    let f = setup();
+    f.token_admin_client.mint(&f.funder, &50);
+
+    let recipients = addrs(&f.env, 1);
+    let amounts = Vec::from_array(&f.env, [50i128]);
+
+    let total = f
+        .client
+        .process_batch(&f.funder, &f.token.address, &recipients, &amounts);
+
+    assert_eq!(total, 50);
+    assert_eq!(f.token.balance(&recipients.get(0).unwrap()), 50);
+    assert_eq!(f.token.balance(&f.funder), 0);
+}
+
+#[test]
 fn error_type_carries_required_traits() {
     fn assert_traits<T: Copy + Clone + core::fmt::Debug + Eq + PartialEq + PartialOrd + Ord>() {}
     assert_traits::<Error>();
