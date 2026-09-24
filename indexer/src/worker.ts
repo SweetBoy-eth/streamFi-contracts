@@ -1,106 +1,125 @@
+import { Pool } from "pg";
+import { createPool, INDEXER_ADVISORY_LOCK_KEY } from "./db.js";
+import { startPollLoop, type FetchEventsFn } from "./poller.js";
+
 /**
- * Worker entrypoint — bare process with HTTP health & metrics.
+ * Worker entry point — `npm run start:worker` runs this file.
  *
- * Previously a blind `process` with no endpoint, no readiness file, and no
- * way for an orchestrator (k8s, systemd, PM2) to tell "started and indexing"
- * from "started but stuck on the placeholder SorobanEventSource" from
- * "crashed". Now exposes:
- *   - `GET /healthz`  — JSON with `lastSuccessfulPollTimestamp` + `currentCursor`
- *   - `GET /metrics`  — Prometheus text format with `pages_processed`,
- *                       `events_folded`, `fold_failures`
- *   - `GET /readyz`   — alias for `/healthz` (k8s readiness probe compat)
+ * Single-instance guarantee:
+ * --------------------------
+ * The indexer is documented as "Single indexer instance" (README Known Gaps).
+ * Nothing previously prevented `npm run start:worker` from being started twice
+ * against the same DATABASE_URL — e.g. an overlapping rolling deploy — with
+ * both workers reading the same cursor and double-folding the same page.
  *
- * Mirrors health-check patterns already used in `stream-fi-app` and
- * `streamFi-sdk` CI (HTTP probe, 200 vs 503) so the same manifest can be
- * copied.
+ * Fix: acquire a Postgres advisory lock at startup. Advisory locks are
+ * session-scoped, so the lock is held for the lifetime of the DB connection
+ * that acquired it and is released automatically when that session ends.
  *
- * Alternative signal (if HTTP is disabled via `HEALTHZ_DISABLE=1`): the
- * worker touches a readiness file at `HEALTHZ_FILE` (default none) on each
- * successful poll — an orchestrator polling that file's mtime gets the same
- * signal without opening a port.
+ * We use pg_try_advisory_lock (non-blocking) so that a second worker exits
+ * cleanly with a clear log message instead of blocking forever or crash-
+ * looping. The lock key is INDEXER_ADVISORY_LOCK_KEY (see db.ts). All
+ * workers contending on the same DATABASE_URL contend on the same key.
+ *
+ * If the lock is already held, we log and exit with code 0 — this is an
+ * expected situation during deploys, not an error, so the process supervisor
+ * (systemd / k8s / Render) should not restart it as a crash. Exiting 0
+ * avoids a crash-loop while still surfacing the condition in logs.
  */
 
-import http from "node:http";
-import fs from "node:fs";
-import { Poller } from "./indexer/poller.js";
-import { StubSorobanEventSource } from "./indexer/eventSource.js";
-import { metrics } from "./metrics.js";
-import { health } from "./health.js";
+type PoolClientWithLock = import("pg").PoolClient;
 
-const PORT = Number(process.env.PORT ?? process.env.HEALTHZ_PORT ?? 3000);
-const START_LEDGER = Number(process.env.START_LEDGER ?? 1);
-const INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 5000);
-const HEALTHZ_FILE = process.env.HEALTHZ_FILE ?? null; // e.g. /tmp/indexer.ready
+async function acquireSingletonLock(pool: Pool): Promise<PoolClientWithLock> {
+  // We must keep the client that acquired the lock open for the lifetime
+  // of the worker — advisory locks are released when the session ends.
+  const client = await pool.connect();
 
-function touchReadyFile(): void {
-  if (!HEALTHZ_FILE) return;
-  try {
-    fs.writeFileSync(HEALTHZ_FILE, new Date().toISOString() + "\n");
-  } catch (e) {
-    console.error(JSON.stringify({ level: "warn", msg: "failed to touch readiness file", error: String(e) }));
+  // pg_try_advisory_lock returns true if we got the lock, false if someone
+  // else holds it. We use the try variant to exit cleanly instead of blocking.
+  const res = await client.query("SELECT pg_try_advisory_lock($1) AS locked", [
+    INDEXER_ADVISORY_LOCK_KEY,
+  ]);
+
+  const locked = res.rows[0].locked === true;
+  if (!locked) {
+    client.release();
+    console.log(
+      `[worker] Another indexer worker already holds advisory lock ${INDEXER_ADVISORY_LOCK_KEY} — exiting cleanly (not a crash).`
+    );
+    // Clean exit — not an error. Prevents crash-loop in supervisors that
+    // restart on non-zero exit.
+    process.exit(0);
   }
+
+  console.log(
+    `[worker] Acquired advisory lock ${INDEXER_ADVISORY_LOCK_KEY} (pg_try_advisory_lock) — single-instance guard active.`
+  );
+
+  // Keep the advisory-lock connection open. We also listen for its errors
+  // so that if the connection drops we exit rather than running unlocked.
+  client.on("error", (err) => {
+    console.error("[worker] Advisory-lock connection error, exiting:", err);
+    process.exit(1);
+  });
+
+  // Also handle advisory lock release on graceful shutdown.
+  const releaseAndExit = async (signal: string) => {
+    console.log(`[worker] Received ${signal}, releasing advisory lock and exiting...`);
+    try {
+      await client.query("SELECT pg_advisory_unlock($1)", [INDEXER_ADVISORY_LOCK_KEY]);
+    } catch {
+      // best-effort — the lock releases automatically when the session closes anyway
+    }
+    client.release();
+    await pool.end();
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => void releaseAndExit("SIGTERM"));
+  process.on("SIGINT", () => void releaseAndExit("SIGINT"));
+
+  return client as PoolClientWithLock;
 }
 
-// Wrap health.markSuccessfulPoll to also touch file
-const origMark = health.markSuccessfulPoll.bind(health);
-health.markSuccessfulPoll = (cursor: Parameters<typeof health.markSuccessfulPoll>[0]) => {
-  origMark(cursor);
-  touchReadyFile();
-};
-
-const poller = new Poller({
-  source: new StubSorobanEventSource(),
-  startLedger: START_LEDGER,
-  intervalMs: INTERVAL_MS,
-  // Add Postgres cursor persistence here when available:
-  // loadCursor: async () => db.getCursor(),
-  // saveCursor: async (c) => db.saveCursor(c),
-});
-
-const server = http.createServer((req, res) => {
-  const url = req.url ?? "/";
-  if (url === "/healthz" || url === "/readyz" || url.startsWith("/healthz?") || url.startsWith("/readyz?")) {
-    const snap = health.snapshot();
-    const body = JSON.stringify(snap, null, 2);
-    const isHealthy = health.isHealthy();
-    res.writeHead(isHealthy ? 200 : 503, { "Content-Type": "application/json" });
-    res.end(body);
-    return;
-  }
-  if (url === "/metrics" || url.startsWith("/metrics?")) {
-    const body = metrics.toPrometheus();
-    res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
-    res.end(body);
-    return;
-  }
-  if (url === "/" || url === "/health") {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("indexer ok — see /healthz and /metrics\n");
-    return;
-  }
-  res.writeHead(404, { "Content-Type": "text/plain" });
-  res.end("not found\n");
-});
-
-server.listen(PORT, async () => {
-  console.error(JSON.stringify({ level: "info", msg: `healthz listening on :${PORT}`, port: PORT, startLedger: START_LEDGER }));
-  try {
-    await poller.start();
-    console.error(JSON.stringify({ level: "info", msg: "poller started", startLedger: START_LEDGER, intervalMs: INTERVAL_MS }));
-  } catch (e) {
-    console.error(JSON.stringify({ level: "error", msg: "poller failed to start", error: String(e) }));
-  }
-});
-
-function shutdown(signal: string): void {
-  console.error(JSON.stringify({ level: "info", msg: `received ${signal}, shutting down` }));
-  poller.stop();
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(1), 5000).unref();
+async function fetchEventsFromRPC(
+  fromLedger: number,
+  limit: number
+): Promise<import("./handlers.js").RawEvent[]> {
+  // Placeholder — in production this would call Horizon / Soroban RPC
+  // `getEvents` with startLedger/fromLedger and pagination.
+  // For local dev without a running node it returns an empty page so the
+  // poller simply advances nothing and sleeps.
+  //
+  // Replace with:
+  //   const rpc = new SorobanRpc.Server(RPC_URL);
+  //   const resp = await rpc.getEvents({ startLedger: fromLedger, limit, filters: [...] });
+  //   return resp.events.map(toRawEvent);
+  void fromLedger;
+  void limit;
+  return [];
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("unhandledRejection", (e) => {
-  console.error(JSON.stringify({ level: "error", msg: "unhandledRejection", error: String(e) }));
-});
+async function main(): Promise<void> {
+  const pool = createPool();
+
+  // Single-instance guard — must be first thing after pool creation, before
+  // any cursor reads or event fetches.
+  await acquireSingletonLock(pool);
+
+  const fetchEvents: FetchEventsFn = fetchEventsFromRPC;
+
+  console.log("[worker] Starting poll loop...");
+  await startPollLoop(pool, fetchEvents, {
+    intervalMs: Number(process.env.POLLER_INTERVAL_MS ?? 5000),
+    limit: Number(process.env.POLLER_PAGE_LIMIT ?? 100),
+  });
+}
+
+// Only run when executed directly (not when imported in tests).
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    console.error("[worker] Fatal error:", err);
+    process.exit(1);
+  });
+}
+
+export { acquireSingletonLock, fetchEventsFromRPC };

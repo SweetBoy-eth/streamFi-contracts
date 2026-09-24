@@ -1,60 +1,104 @@
--- StreamFi indexer — initial schema (legacy one-shot).
--- DEPRECATED: use versioned migrations in `db/migrations/` via `npm run migrate`
--- (`indexer/src/db/migrate.ts` or `node db/migrate.js up`).
--- This file is retained for reference and for fresh local `psql` bootstraps
--- without the runner. New schema changes must go in `db/migrations/*.sql`
--- with a monotonically increasing numeric prefix.
---
--- To apply with the runner:  DATABASE_URL=postgres://... npm run --prefix indexer migrate
--- Legacy one-shot (no history):  psql "$DATABASE_URL" -f db/schema.sql
+-- StreamFi indexer schema
+-- Applies to Postgres. Run with: psql $DATABASE_URL -f db/schema.sql
 
--- Streams — one row per DripStream contract instance
-CREATE TABLE IF NOT EXISTS streams (
-    stream_id        BIGINT PRIMARY KEY,
-    contract_address TEXT NOT NULL UNIQUE,
-    sender           TEXT NOT NULL,
-    recipient        TEXT NOT NULL,
-    token            TEXT NOT NULL,
-    rate_per_second  TEXT NOT NULL, -- i128 decimal string
-    start_time       BIGINT NOT NULL,
-    end_time         BIGINT NOT NULL, -- 0 = open-ended
-    status           TEXT NOT NULL DEFAULT 'active', -- active | paused | cancelled
-    withdrawn_total  TEXT NOT NULL DEFAULT '0',
-    created_at_ledger BIGINT NOT NULL,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_streams_sender    ON streams(sender);
-CREATE INDEX IF NOT EXISTS idx_streams_recipient ON streams(recipient);
+-- Raw events ingested from Horizon / Soroban RPC.
+-- Each row is an immutable ledger event; derived tables fold over this log.
 
--- Raw events — append-only log of every Soroban event folded
 CREATE TABLE IF NOT EXISTS raw_events (
     id          BIGSERIAL PRIMARY KEY,
-    ledger      INTEGER NOT NULL,
-    tx_hash     TEXT NOT NULL,
-    contract_id TEXT NOT NULL,
-    type        TEXT NOT NULL, -- e.g. created, withdrawn, cancelled, xfer_rec
-    sequence    BIGINT,        -- per-stream monotonic seq, NULL for factory events
-    fields      JSONB NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (tx_hash, type, sequence)
-);
--- The type index speeds up "all withdrawals for stream X" and the proposed
--- `raw_events_type_idx` change elsewhere in this batch.
-CREATE INDEX IF NOT EXISTS idx_raw_events_type         ON raw_events(type);
-CREATE INDEX IF NOT EXISTS idx_raw_events_contract_ledger ON raw_events(contract_id, ledger);
-CREATE INDEX IF NOT EXISTS idx_raw_events_ledger        ON raw_events(ledger);
-
--- Indexer cursor — high-water mark for the poller (single row, id=1)
-CREATE TABLE IF NOT EXISTS indexer_cursor (
-    id          INTEGER PRIMARY KEY CHECK (id = 1),
-    last_ledger INTEGER NOT NULL,
-    next_token  TEXT,
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    ledger      BIGINT      NOT NULL,
+    tx_hash     TEXT        NOT NULL,
+    event_type  TEXT        NOT NULL,
+    contract_id TEXT        NOT NULL,
+    topics      JSONB,
+    data        JSONB       NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- Prevent double-ingest of the same ledger event when poller retries a page.
+    UNIQUE (ledger, tx_hash, event_type, contract_id)
 );
 
--- Migration history — managed by the migration runner, not hand-edited
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version    TEXT PRIMARY KEY, -- e.g. 001_initial
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+-- Ledger scan — poller fetches "all events since cursor" ordered by ledger.
+CREATE INDEX IF NOT EXISTS raw_events_ledger_idx ON raw_events (ledger);
+
+-- Event-type filter — replay / backfill tooling ("all stream_withdrawn since X")
+-- and handler routing both filter by event_type. Without this every such query
+-- is a sequential scan. Cheap to add while the table is small; expensive as a
+-- concurrent migration against a large production table.
+CREATE INDEX IF NOT EXISTS raw_events_type_idx ON raw_events (event_type);
+
+-- Optional composite for the common "type + ledger range" replay query.
+CREATE INDEX IF NOT EXISTS raw_events_type_ledger_idx ON raw_events (event_type, ledger);
+
+-- Cursor — single row, id = 1, tracks the last successfully folded ledger.
+CREATE TABLE IF NOT EXISTS cursor (
+    id          INT    PRIMARY KEY CHECK (id = 1),
+    last_ledger BIGINT NOT NULL DEFAULT 0,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO cursor (id, last_ledger) VALUES (1, 0) ON CONFLICT (id) DO NOTHING;
+
+-- Derived tables — folded projections over raw_events. All upserts must be
+-- idempotent (INSERT ... ON CONFLICT DO UPDATE/NOTHING) so that re-folding
+-- an already-applied page after a crash between ingestPage and saveCursor
+-- does not double-count. See indexer/src/handlers.ts and poller.ts.
+
+CREATE TABLE IF NOT EXISTS stream_states (
+    stream_id       TEXT        PRIMARY KEY,
+    sender          TEXT        NOT NULL,
+    recipient       TEXT        NOT NULL,
+    token           TEXT        NOT NULL,
+    deposit         BIGINT      NOT NULL,
+    rate_per_second BIGINT      NOT NULL,
+    withdrawn       BIGINT      NOT NULL DEFAULT 0,
+    paused          BOOLEAN     NOT NULL DEFAULT FALSE,
+    cancelled       BOOLEAN     NOT NULL DEFAULT FALSE,
+    updated_ledger  BIGINT      NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS stream_withdrawals (
+    id         BIGSERIAL PRIMARY KEY,
+    stream_id  TEXT        NOT NULL REFERENCES stream_states(stream_id) ON DELETE CASCADE,
+    ledger     BIGINT      NOT NULL,
+    tx_hash    TEXT        NOT NULL,
+    recipient  TEXT        NOT NULL,
+    amount     BIGINT      NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (ledger, tx_hash, stream_id)
+);
+
+-- Example governance-derived tables referenced by handlers.ts.
+-- Kept here so handlers.test.ts can exercise real DDL without extra setup.
+
+CREATE TABLE IF NOT EXISTS loan_votes (
+    loan_id    TEXT        NOT NULL,
+    voter      TEXT        NOT NULL,
+    support    BOOLEAN     NOT NULL,
+    weight     BIGINT      NOT NULL,
+    ledger     BIGINT      NOT NULL,
+    tx_hash    TEXT        NOT NULL,
+    PRIMARY KEY (loan_id, voter),
+    UNIQUE (ledger, tx_hash, loan_id, voter)
+);
+
+CREATE TABLE IF NOT EXISTS treasury_votes (
+    proposal_id TEXT   NOT NULL,
+    voter       TEXT   NOT NULL,
+    support     BOOLEAN NOT NULL,
+    weight      BIGINT NOT NULL,
+    ledger      BIGINT NOT NULL,
+    tx_hash     TEXT   NOT NULL,
+    PRIMARY KEY (proposal_id, voter),
+    UNIQUE (ledger, tx_hash, proposal_id, voter)
+);
+
+CREATE TABLE IF NOT EXISTS treasury_reveals (
+    proposal_id TEXT   NOT NULL,
+    voter       TEXT   NOT NULL,
+    vote_hash   TEXT   NOT NULL,
+    ledger      BIGINT NOT NULL,
+    tx_hash     TEXT   NOT NULL,
+    PRIMARY KEY (proposal_id, voter),
+    UNIQUE (ledger, tx_hash, proposal_id, voter)
 );
