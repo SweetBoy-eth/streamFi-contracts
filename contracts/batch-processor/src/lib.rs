@@ -1,6 +1,9 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, token, Address, Env, Vec};
+#[cfg(test)]
+mod tests;
+
+use soroban_sdk::{contract, contracterror, contractimpl, token, Address, Env, Symbol, Vec};
 
 /// Maximum number of transfers permitted in a single batch.
 const MAX_BATCH_SIZE: u32 = 100;
@@ -35,6 +38,14 @@ impl BatchTransferProcessor {
     /// - `recipients` and `amounts` must have the same length.
     /// - The batch must not exceed `MAX_BATCH_SIZE` (100 entries).
     /// - Every individual `amount` must be > 0.
+    ///
+    /// # Events
+    /// After every transfer completes, a `batch_transferred` event is
+    /// published so indexers and off-chain listeners can observe the batch
+    /// without diffing token balances. Topics: `[funder]` (the event symbol
+    /// `batch_transferred` is topic 0, matching the workspace convention);
+    /// data: `{ token, recipient_count, total }`. Rejected calls and the
+    /// empty-batch short-circuit emit nothing.
     ///
     /// # Returns
     /// The total number of tokens transferred on success.
@@ -85,6 +96,14 @@ impl BatchTransferProcessor {
         for (recipient, amount) in recipients.iter().zip(amounts.iter()) {
             tk.transfer(&contract_addr, &recipient, &amount);
         }
+
+        // Emitted only after the fan-out above succeeds: a reverted transfer
+        // rolls the whole transaction back, so this event never describes a
+        // batch that did not actually move funds.
+        env.events().publish(
+            (Symbol::new(&env, "batch_transferred"), funder.clone()),
+            (token.clone(), recipients.len(), total),
+        );
 
         Ok(total)
     }
