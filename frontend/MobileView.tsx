@@ -4,7 +4,7 @@ import { validateStreamPayload } from './lib/validateStreamPayload';
 import { useFeeEstimate } from './lib/useFeeEstimate';
 
 const SUBMIT_STREAM_REQUEST_MOBILE = gql`
-  mutation SubmitStreamRequestMobile($recipient: String!, $amount: Float!, $ratePerSecond: Float!) {
+  mutation SubmitStreamRequestMobile($recipient: String!, $amount: String!, $ratePerSecond: String!) {
     submitStreamRequest(recipient: $recipient, amount: $amount, ratePerSecond: $ratePerSecond) {
       id
       status
@@ -24,8 +24,8 @@ export const MobileView: React.FC = () => {
 
   const hasValidInputs = validateStreamPayload({
     recipient,
-    amount: Number(amount),
-    ratePerSecond: Number(ratePerSecond),
+    amount,
+    ratePerSecond,
   }).valid;
 
   const { estimate: feeEstimate, loading: feeLoading, error: feeError } = useFeeEstimate({
@@ -48,8 +48,8 @@ export const MobileView: React.FC = () => {
 
     const payload = {
       recipient,
-      amount: Number(amount),
-      ratePerSecond: Number(ratePerSecond),
+      amount,
+      ratePerSecond,
     };
 
     // FIX for Bug #159: same underlying issue as the desktop Wallet

@@ -4,6 +4,14 @@ use soroban_sdk::{contracttype, Address, Vec};
 ///
 /// Each variant corresponds to a distinct transaction shape with different
 /// resource requirements (CPU instructions, read/write entries, etc.).
+///
+/// Keep the variant list — names **and** order — in exact sync with
+/// `STREAM_OPERATIONS` in `frontend/lib/estimateFee.ts`. The frontend sends
+/// the variant name as the `ScVec[ScSymbol(variant_name)]` encoding that
+/// `#[contracttype]` unit enums use, so a variant that exists in TypeScript
+/// but not here makes `estimate_fee` fail to decode the argument (and vice
+/// versa). `frontend/lib/estimateFee.test.ts` parses both files and fails
+/// whenever they drift (issue #579).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StreamOperation {
@@ -21,6 +29,31 @@ pub enum StreamOperation {
     PauseStream,
     /// Resume a paused stream via `DripStream::resume`.
     ResumeStream,
+    /// Appoint an operator via `DripStream::set_operator`. Low cost: single
+    /// cross-contract call + operator storage write + event emission.
+    SetOperator,
+    /// Remove an operator via `DripStream::revoke_operator`. Low cost:
+    /// single cross-contract call + operator storage clear + event emission.
+    RevokeOperator,
+    /// Extend a stream's end time via `DripStream::extend_duration`. Moderate
+    /// cost: duration math + stream-info storage write + TTL bump.
+    ExtendDuration,
+    /// Add funds to a stream's deposit via `DripStream::top_up`. Moderate
+    /// cost: inbound token transfer + balance update + event emission.
+    TopUp,
+    /// Top up and extend in one call via `DripStream::top_up_and_extend`.
+    /// Combines both cost profiles: transfer + duration math + storage write.
+    TopUpAndExtend,
+    /// Reclaim the unstreamed remainder via `DripStream::clawback`. Moderate
+    /// cost: outbound token transfer + balance settlement + event emission.
+    Clawback,
+    /// Terminate via `DripStream::force_cancel`. Moderate cost: settlement +
+    /// refund transfer + event emission, like `CancelStream`.
+    ForceCancel,
+    /// Move the stream to a new recipient via
+    /// `DripStream::transfer_recipient`. Low cost: single cross-contract call
+    /// + recipient storage write + event emission.
+    TransferRecipient,
 }
 
 /// Result of a Soroban fee simulation for a stream operation.

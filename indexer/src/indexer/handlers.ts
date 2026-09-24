@@ -22,6 +22,21 @@ export async function applyEvent(client: PoolClient, ev: ChainEvent): Promise<vo
     case 'treasury_reveal':
       return treasury_reveal(client, ev)
     default:
+      // Log (don't throw) on anything we don't recognise: today that's every
+      // event type except the three DAO-voting folds above. Once real
+      // DripStream/DripFactory handlers land here, a future contract upgrade
+      // that adds a new event type must show up in the logs instead of
+      // disappearing into this indexer silently (issue #578).
+      console.error(
+        JSON.stringify({
+          level: 'warn',
+          msg: 'applyEvent: unrecognized event type, dropping',
+          type: ev.type,
+          ledger: ev.ledger,
+          contractId: ev.contractId,
+          txHash: ev.txHash,
+        }),
+      )
       return
   }
 }

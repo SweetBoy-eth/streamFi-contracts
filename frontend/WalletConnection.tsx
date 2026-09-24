@@ -8,7 +8,7 @@ import { useWalletSession } from './lib/useWalletSession';
 const FACTORY_ADDRESS = process.env.REACT_APP_FACTORY_ADDRESS ?? '';
 
 const SUBMIT_STREAM_REQUEST = gql`
-  mutation SubmitStreamRequest($recipient: String!, $amount: Float!, $ratePerSecond: Float!) {
+  mutation SubmitStreamRequest($recipient: String!, $amount: String!, $ratePerSecond: String!) {
     submitStreamRequest(recipient: $recipient, amount: $amount, ratePerSecond: $ratePerSecond) {
       id
       status
@@ -37,8 +37,8 @@ export const WalletConnection: React.FC = () => {
 
   const hasValidInputs = validateStreamPayload({
     recipient,
-    amount: Number(amount),
-    ratePerSecond: Number(ratePerSecond),
+    amount,
+    ratePerSecond,
   }).valid;
 
   const { estimate: feeEstimate, loading: feeLoading, error: feeError } = useFeeEstimate({
@@ -54,8 +54,8 @@ export const WalletConnection: React.FC = () => {
   const validateCurrentInputs = (overrides: Partial<{ recipient: string; amount: string; ratePerSecond: string }> = {}) => {
     const result = validateStreamPayload({
       recipient: overrides.recipient ?? recipient,
-      amount: Number(overrides.amount ?? amount),
-      ratePerSecond: Number(overrides.ratePerSecond ?? ratePerSecond),
+      amount: overrides.amount ?? amount,
+      ratePerSecond: overrides.ratePerSecond ?? ratePerSecond,
     });
     setValidationErrors(result.errors);
   };
@@ -80,8 +80,8 @@ export const WalletConnection: React.FC = () => {
 
     const payload = {
       recipient,
-      amount: Number(amount),
-      ratePerSecond: Number(ratePerSecond),
+      amount,
+      ratePerSecond,
     };
 
     // FIX for Bug #149: validation previously only ran on each input's

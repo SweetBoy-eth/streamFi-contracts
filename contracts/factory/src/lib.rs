@@ -954,6 +954,70 @@ impl DripFactory {
                 // Entries: 1 read + 1 write = 2
                 (400_000, 2)
             }
+            StreamOperation::SetOperator => {
+                // Low cost: single cross-contract call to DripStream::set_operator,
+                // operator storage write, event emission.
+                //
+                // CPU: ~400_000 instructions
+                // Entries: 1 read (stream info) + 1 write (operator) = 2
+                (400_000, 2)
+            }
+            StreamOperation::RevokeOperator => {
+                // Low cost: single cross-contract call to DripStream::revoke_operator,
+                // operator storage clear, event emission.
+                //
+                // CPU: ~400_000 instructions
+                // Entries: 1 read (stream info) + 1 write (operator) = 2
+                (400_000, 2)
+            }
+            StreamOperation::ExtendDuration => {
+                // Moderate cost: duration math over start/end times, stream-info
+                // storage write, persistent-entry TTL bump.
+                //
+                // CPU: ~600_000 instructions
+                // Entries: 1 read + 1 write = 2
+                (600_000, 2)
+            }
+            StreamOperation::TopUp => {
+                // Moderate cost: inbound token transfer, deposit balance update,
+                // event emission.
+                //
+                // CPU: ~700_000 instructions
+                // Entries: 1 read + 1 write = 2
+                (700_000, 2)
+            }
+            StreamOperation::TopUpAndExtend => {
+                // Highest of the stream-side ops: inbound token transfer +
+                // duration math + deposit/end-time storage write + TTL bump.
+                //
+                // CPU: ~900_000 instructions
+                // Entries: 1 read + 2 writes = 3
+                (900_000, 3)
+            }
+            StreamOperation::Clawback => {
+                // Moderate cost: outbound token transfer back to sender,
+                // balance settlement, event emission.
+                //
+                // CPU: ~700_000 instructions
+                // Entries: 1 read + 1 write = 2
+                (700_000, 2)
+            }
+            StreamOperation::ForceCancel => {
+                // Moderate cost: settlement + refund transfer + event emission,
+                // same shape as CancelStream.
+                //
+                // CPU: ~800_000 instructions
+                // Entries: 1 read + 1 write = 2
+                (800_000, 2)
+            }
+            StreamOperation::TransferRecipient => {
+                // Low cost: single cross-contract call, recipient storage write,
+                // event emission.
+                //
+                // CPU: ~400_000 instructions
+                // Entries: 1 read + 1 write = 2
+                (400_000, 2)
+            }
         };
 
         // fee_stroops and fee_xlm are set to 0 here — the frontend

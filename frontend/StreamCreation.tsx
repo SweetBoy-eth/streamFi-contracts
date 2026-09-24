@@ -10,8 +10,8 @@ const RPC_URL = process.env.REACT_APP_RPC_URL ?? 'https://soroban-testnet.stella
 
 interface CreateStreamPayload {
   recipient: string;
-  amount: number;
-  ratePerSecond: number;
+  amount: string;
+  ratePerSecond: string;
 }
 
 async function createStreamOnChain(payload: CreateStreamPayload): Promise<{ streamId: string }> {
@@ -42,8 +42,8 @@ export const StreamCreation: React.FC = () => {
   const validateCurrentInputs = () => {
     const result = validateStreamPayload({
       recipient,
-      amount: Number(amount),
-      ratePerSecond: Number(ratePerSecond),
+      amount,
+      ratePerSecond,
     });
     setValidationErrors(result.errors);
   };
@@ -55,8 +55,8 @@ export const StreamCreation: React.FC = () => {
 
     const result = validateStreamPayload({
       recipient,
-      amount: Number(amount),
-      ratePerSecond: Number(ratePerSecond),
+      amount,
+      ratePerSecond,
     });
 
     if (!result.valid || !FACTORY_ADDRESS) {
@@ -92,7 +92,7 @@ export const StreamCreation: React.FC = () => {
     event.preventDefault();
     setValidationErrors([]);
 
-    const payload = { recipient, amount: Number(amount), ratePerSecond: Number(ratePerSecond) };
+    const payload = { recipient, amount, ratePerSecond };
     const result = validateStreamPayload(payload);
     if (!result.valid) {
       setValidationErrors(result.errors);

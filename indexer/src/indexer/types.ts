@@ -237,6 +237,30 @@ export interface SorobanEvent {
   sequence: number | null;
 }
 
+/**
+ * Fold input for `applyEvent` (`handlers.ts`).
+ *
+ * Deliberately looser than {@link SorobanEvent}: the DAO-voting folds (loan /
+ * treasury proposals) key off a free-form `type` tag plus an untyped `fields`
+ * payload rather than the fixed per-type shapes documented above. The
+ * optional context fields (`ledger`, `contractId`, `txHash`) are attached to
+ * the structured warn line `applyEvent` emits when it drops an event type it
+ * doesn't recognise (issue #578), so an unrecognized type can be traced back
+ * to the exact transaction that produced it.
+ */
+export interface ChainEvent {
+  /** Event type tag — matched by `applyEvent`'s switch. */
+  type: string;
+  /** Type-specific payload. Shape depends on {@link ChainEvent.type}. */
+  fields: Record<string, unknown>;
+  /** Ledger the event was emitted in, when known. */
+  ledger?: number;
+  /** Contract that emitted the event, when known. */
+  contractId?: string;
+  /** Transaction hash, when known. */
+  txHash?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Event source contract
 // ---------------------------------------------------------------------------

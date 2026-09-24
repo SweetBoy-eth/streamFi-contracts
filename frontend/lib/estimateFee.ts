@@ -1,4 +1,4 @@
-import { TransactionBuilder, Contract, Address, xdr } from '@stellar/stellar-sdk/base';
+import { TransactionBuilder, Contract, xdr } from '@stellar/stellar-sdk/base';
 import { Server as SorobanRpc, Api } from '@stellar/stellar-sdk/rpc';
 
 const SIMULATION_TIMEOUT_MS = 10_000;
@@ -11,20 +11,33 @@ export interface FeeEstimate {
   ledger_entries: number;
 }
 
-export type StreamOperation = 
-  | 'CreateStream' 
-  | 'CancelStream' 
-  | 'Withdraw' 
-  | 'PauseStream' 
-  | 'ResumeStream'
-  | 'SetOperator'
-  | 'RevokeOperator'
-  | 'ExtendDuration'
-  | 'TopUp'
-  | 'TopUpAndExtend'
-  | 'Clawback'
-  | 'ForceCancel'
-  | 'TransferRecipient';
+/**
+ * Every stream operation `DripFactory::estimate_fee` accepts.
+ *
+ * This array is the runtime single source of truth for the
+ * {@link StreamOperation} union — adding or removing an entry updates the
+ * type, so TypeScript and this list can never disagree. The list itself must
+ * stay in exact sync (names and order) with the `StreamOperation` enum in
+ * `contracts/factory/src/storage.rs`; `estimateFee.test.ts` parses both files
+ * and fails the build whenever they drift (issue #579).
+ */
+export const STREAM_OPERATIONS = [
+  'CreateStream',
+  'CancelStream',
+  'Withdraw',
+  'PauseStream',
+  'ResumeStream',
+  'SetOperator',
+  'RevokeOperator',
+  'ExtendDuration',
+  'TopUp',
+  'TopUpAndExtend',
+  'Clawback',
+  'ForceCancel',
+  'TransferRecipient',
+] as const;
+
+export type StreamOperation = (typeof STREAM_OPERATIONS)[number];
 
 /**
  * Estimate the Soroban network fee for a stream operation by simulating
@@ -58,22 +71,19 @@ export async function estimateFee(
   // Soroban simulates the full operation including contract invocation,
   // CPU instruction counting, and ledger entry access tracking.
   const transaction = new TransactionBuilder(account, {
-    fee: 0, // Simulation is free — the RPC calculates the actual fee
+    fee: '0', // Simulation is free — the RPC calculates the actual fee
     networkPassphrase,
   })
     .addOperation(
-      Contract.invokeFunction({
-        contract: factoryId,
-        function: 'estimate_fee',
-        args: [
-          // StreamOperation enum — serialized as ScVal::Vec([ScVal::U32(discriminant), ScVal::Void])
-          // for simple unit variants in Soroban's #[contracttype] enum format.
-          xdr.ScVal.scvVec([
-            xdr.ScVal.scvU32(operationToDiscriminant(operation)),
-            xdr.ScVal.scvVoid(),
-          ]),
-        ],
-      }),
+      new Contract(factoryId).call(
+        'estimate_fee',
+        // #[contracttype] unit-variant enums encode as a one-element vector
+        // holding the variant name as a Symbol — ScVec[ScSymbol(operation)] —
+        // not a numeric discriminant (see soroban-sdk's derive_enum). The
+        // factory decodes the variant by name, so every name listed in
+        // STREAM_OPERATIONS must exist on the Rust enum too.
+        xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(operation)]),
+      ),
     )
     .setTimeout(SIMULATION_TIMEOUT_MS)
     .build();
@@ -91,18 +101,14 @@ export async function estimateFee(
   // calculated from the actual CPU/RAM usage of the simulated operation.
   const feeStroops = parseInt(simulation.minResourceFee ?? '0', 10);
 
-  // Derive resource metrics from the transaction data.
-  // The SorobanDataBuilder contains the resource footprint of the simulation.
-  const txData = simulation.transactionData;
-  const resourceFee = txData?.resourceFee() ?? 0n;
-
-  // Estimate CPU instructions and ledger entries from the fee breakdown.
-  // The simulation cost is proportional to actual resource consumption.
-  const cpuInstructions = feeStroops > 0 ? Math.max(1, Math.ceil(feeStroops / 100)) : 0;
-  const ledgerEntries = txData?.resourceFootprint()
-    ? txData!.resourceFootprint().readWrite().length +
-      txData!.resourceFootprint().readOnly().length
-    : 0;
+  // Real resource figures the RPC filled in from executing the simulation —
+  // not a derived heuristic. `resources.instructions` is the CPU instruction
+  // count the simulated invocation requires, and the resource footprint
+  // lists every ledger entry it touched (issue #580).
+  const txData = simulation.transactionData.build();
+  const cpuInstructions = txData.resources.instructions;
+  const footprint = txData.resources.footprint;
+  const ledgerEntries = footprint.readOnly.length + footprint.readWrite.length;
 
   const feeXlm = (feeStroops / STROOPS_PER_XLM).toFixed(7);
 
@@ -112,23 +118,4 @@ export async function estimateFee(
     cpu_instructions: cpuInstructions,
     ledger_entries: ledgerEntries,
   };
-}
-
-function operationToDiscriminant(op: string): number {
-  const map: Record<string, number> = {
-    CreateStream: 0,
-    CancelStream: 1,
-    Withdraw: 2,
-    PauseStream: 3,
-    ResumeStream: 4,
-    SetOperator: 5,
-    RevokeOperator: 6,
-    ExtendDuration: 7,
-    TopUp: 8,
-    TopUpAndExtend: 9,
-    Clawback: 10,
-    ForceCancel: 11,
-    TransferRecipient: 12,
-  };
-  return map[op] ?? 0;
 }
