@@ -2488,3 +2488,47 @@ fn every_state_mutating_entry_point_uses_with_guard() {
     // Verify stream is still active (not cancelled) and tracks streamed amount.
     assert_eq!(client.streamed_total(), 1000);
 }
+
+// ── Single guard API regression (issues #453 / #454) ───────────────────────
+
+#[test]
+fn stream_exposes_exactly_one_reentrancy_guard_api() {
+    // Issues #453/#454: a merged PR (#373) left a second, unused guard
+    // mechanism in `storage.rs` — `read_guard`/`write_guard` helpers plus the
+    // `GUARD_NOT_ENTERED`/`GUARD_ENTERED` constants they used — coexisting
+    // with the real depth-counter guard (`state::lock`/`unlock`/`with_guard`
+    // at `DataKey::Guard`). The dead pair was deleted so there is exactly one
+    // guard API; this test is the living regression check that keeps it that
+    // way. `include_str!` embeds the source at compile time, so the assertion
+    // is a pure string check with no I/O.
+    let storage_src = include_str!("storage.rs");
+    for dead in [
+        "read_guard",
+        "write_guard",
+        "GUARD_NOT_ENTERED",
+        "GUARD_ENTERED",
+    ] {
+        assert!(
+            !storage_src.contains(dead),
+            "dead reentrancy-guard helper `{dead}` reappeared in storage.rs — \
+             the stream contract must expose a single guard API \
+             (state::lock / state::unlock / state::with_guard)"
+        );
+    }
+
+    // The live guard must remain the depth-counter API in `state.rs`, wired
+    // to `DataKey::Guard`. The fn-pointer references below additionally fail
+    // to compile if `lock`/`unlock` are ever removed or reshaped.
+    let state_src = include_str!("state.rs");
+    assert!(
+        state_src.contains("pub fn with_guard"),
+        "state::with_guard missing — the depth-counter guard is the one guard API"
+    );
+    assert!(
+        state_src.contains("DataKey::Guard"),
+        "state guard no longer stored at DataKey::Guard"
+    );
+
+    let _lock: fn(&Env) -> Result<(), Error> = crate::state::lock;
+    let _unlock: fn(&Env) = crate::state::unlock;
+}

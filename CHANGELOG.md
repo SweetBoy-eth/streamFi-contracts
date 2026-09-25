@@ -7,6 +7,9 @@ All notable changes are documented here. Format based on [Keep a Changelog](http
 ### Added
 - Extended `scripts/query.sh` with configurable source identities and factory/governor read modes.
 - Added ADR-007 documenting the scope of `BatchTransferProcessor` and updated the architecture overview for supporting contracts and applications.
+- **`batch_transferred` event on `BatchTransferProcessor::process_batch` (#553).** The processor moved real token balances without publishing anything, so indexers had to diff token balances to detect a batch. It now emits `batch_transferred` after the fan-out completes — topics `("batch_transferred", funder)`, data `(token, recipient_count, total)` — with nothing emitted on rejected calls or the empty-batch short-circuit.
+- **Unit test suite for `contracts/batch-processor` (#552).** New `contracts/batch-processor/src/tests.rs` covering the happy path (including a batch of exactly `MAX_BATCH_SIZE`), `LengthMismatch`, `BatchTooLarge`, `InvalidAmount` (zero and negative), the empty-batch short-circuit, the `checked_add` overflow path in the accumulation loop, and the `batch_transferred` event payload — the workspace's only deployed member that previously had zero test coverage.
+- **Single-guard-API regression test for the stream contract (#453, #454).** The dead second reentrancy mechanism (`storage::read_guard`/`write_guard` plus `GUARD_NOT_ENTERED`/`GUARD_ENTERED`, left behind by the #373 merge) was already deleted so only the depth-counter guard (`state::lock`/`unlock`/`with_guard` at `DataKey::Guard`) remains; a new test now fails if any of those dead symbols are reintroduced into `storage.rs`, locking in the single guard API.
 
 ### Fixed
 - Settings page crash on load — created `app/settings/page.tsx` with properly guarded state initialization (conduit-protocol/streamFi-app#270, closes #156)

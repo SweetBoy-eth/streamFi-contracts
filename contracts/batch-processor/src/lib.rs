@@ -1,6 +1,9 @@
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, token, Address, Env, Vec};
+#[cfg(test)]
+mod tests;
+
+use soroban_sdk::{contract, contracterror, contractimpl, token, Address, Env, Symbol, Vec};
 
 /// Maximum number of transfers permitted in a single batch.
 const MAX_BATCH_SIZE: u32 = 100;
@@ -118,6 +121,14 @@ impl BatchTransferProcessor {
         for (recipient, amount) in recipients.iter().zip(amounts.iter()) {
             tk.transfer(&contract_addr, &recipient, &amount);
         }
+
+        // Emitted only after the fan-out above succeeds: a reverted transfer
+        // rolls the whole transaction back, so this event never describes a
+        // batch that did not actually move funds.
+        env.events().publish(
+            (Symbol::new(&env, "batch_transferred"), funder.clone()),
+            (token.clone(), recipients.len(), total),
+        );
 
         Ok(total)
     }
